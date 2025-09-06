@@ -1,25 +1,51 @@
+// controllers/tripayController.js
 const crypto = require('crypto');
 const axios = require('axios');
-const { Subscription, User, SubscriptionPlan, db } = require('../models');
+const { Subscription, User, SubscriptionPlan, Setting, db } = require('../models');
 
 // Konfigurasi Tripay
-const TRIPAY_API_KEY = process.env.TRIPAY_API_KEY || 'your-api-key';
-const TRIPAY_PRIVATE_KEY = process.env.TRIPAY_PRIVATE_KEY || 'your-private-key';
-const TRIPAY_MERCHANT_CODE = process.env.TRIPAY_MERCHANT_CODE || 'your-merchant-code';
-const TRIPAY_URL = process.env.TRIPAY_URL || 'https://tripay.co.id/api';
+const getTripayConfig = async () => {
+  try {
+    const apiKey = await Setting.findOne({ where: { key: 'tripay_api_key' } });
+    const privateKey = await Setting.findOne({ where: { key: 'tripay_private_key' } });
+    const merchantCode = await Setting.findOne({ where: { key: 'tripay_merchant_code' } });
+    const sandboxMode = await Setting.findOne({ where: { key: 'tripay_sandbox_mode' } });
+    
+    return {
+      apiKey: apiKey ? apiKey.value : process.env.TRIPAY_API_KEY || '',
+      privateKey: privateKey ? privateKey.value : process.env.TRIPAY_PRIVATE_KEY || '',
+      merchantCode: merchantCode ? merchantCode.value : process.env.TRIPAY_MERCHANT_CODE || '',
+      sandboxMode: sandboxMode ? sandboxMode.value === 'true' : false,
+      baseUrl: (sandboxMode && sandboxMode.value === 'true') 
+        ? 'https://tripay.co.id/api-sandbox' 
+        : 'https://tripay.co.id/api'
+    };
+  } catch (error) {
+    console.error('Error mengambil konfigurasi Tripay:', error);
+    return {
+      apiKey: process.env.TRIPAY_API_KEY || '',
+      privateKey: process.env.TRIPAY_PRIVATE_KEY || '',
+      merchantCode: process.env.TRIPAY_MERCHANT_CODE || '',
+      sandboxMode: false,
+      baseUrl: 'https://tripay.co.id/api'
+    };
+  }
+};
 
-// Get payment channels dari Tripay
+// Mendapatkan channel pembayaran dari Tripay
 const getPaymentChannels = async (req, res) => {
   try {
-    const response = await axios.get(`${TRIPAY_URL}/merchant/payment-channel`, {
+    const config = await getTripayConfig();
+    
+    const response = await axios.get(`${config.baseUrl}/merchant/payment-channel`, {
       headers: {
-        'Authorization': `Bearer ${TRIPAY_API_KEY}`
+        'Authorization': `Bearer ${config.apiKey}`
       }
     });
 
     return res.status(200).json(response.data.data);
   } catch (error) {
-    console.error('Error fetching payment channels:', error);
+    console.error('Error mengambil metode pembayaran:', error);
     return res.status(500).json({ error: 'Gagal mengambil metode pembayaran' });
   }
 };
@@ -28,14 +54,15 @@ const getPaymentChannels = async (req, res) => {
 const calculateFee = async (req, res) => {
   try {
     const { amount, code } = req.body;
+    const config = await getTripayConfig();
 
     if (!amount || !code) {
       return res.status(400).json({ error: 'Parameter tidak lengkap' });
     }
 
-    const response = await axios.get(`${TRIPAY_URL}/merchant/fee-calculator`, {
+    const response = await axios.get(`${config.baseUrl}/merchant/fee-calculator`, {
       headers: {
-        'Authorization': `Bearer ${TRIPAY_API_KEY}`
+        'Authorization': `Bearer ${config.apiKey}`
       },
       params: {
         amount,
@@ -45,7 +72,7 @@ const calculateFee = async (req, res) => {
 
     return res.status(200).json(response.data.data);
   } catch (error) {
-    console.error('Error calculating fee:', error);
+    console.error('Error menghitung biaya transaksi:', error);
     return res.status(500).json({ error: 'Gagal menghitung biaya transaksi' });
   }
 };
@@ -53,6 +80,8 @@ const calculateFee = async (req, res) => {
 // Membuat transaksi baru
 const createTransaction = async (req, res) => {
   try {
+    const config = await getTripayConfig();
+    
     const {
       plan_id,
       payment_method,
@@ -84,8 +113,8 @@ const createTransaction = async (req, res) => {
     const merchantRef = `SUB-${userId}-${Date.now()}`;
     const amount = plan.price;
     const signature = crypto
-      .createHmac('sha256', TRIPAY_PRIVATE_KEY)
-      .update(`${TRIPAY_MERCHANT_CODE}${merchantRef}${amount}`)
+      .createHmac('sha256', config.privateKey)
+      .update(`${config.merchantCode}${merchantRef}${amount}`)
       .digest('hex');
 
     // Data untuk request ke Tripay
@@ -104,15 +133,15 @@ const createTransaction = async (req, res) => {
           subtotal: amount
         }
       ],
-      callback_url: `${req.protocol}://${req.get('host')}/api/tripay/callback`,
-      return_url: `${req.protocol}://${req.get('host')}/user/page/${user.url_slug}/subscription`,
+      callback_url: `${process.env.BACKEND_URL || req.protocol + '://' + req.get('host')}/api/tripay/callback`,
+      return_url: `${process.env.FRONTEND_URL || 'https://kinterstore.my.id'}/user/page/${user.url_slug}/subscription`,
       signature: signature
     };
 
     // Request ke Tripay untuk membuat transaksi
-    const response = await axios.post(`${TRIPAY_URL}/transaction/create`, data, {
+    const response = await axios.post(`${config.baseUrl}/transaction/create`, data, {
       headers: {
-        'Authorization': `Bearer ${TRIPAY_API_KEY}`
+        'Authorization': `Bearer ${config.apiKey}`
       }
     });
 
@@ -145,11 +174,7 @@ const createTransaction = async (req, res) => {
           end_date: endDate,
           payment_status: 'pending',
           payment_method: 'tripay',
-          updatedAt: new Date()
-        }, { transaction });
-        
-        // Simpan referensi transaksi ke subscription yang ada
-        await activeSubscription.update({
+          updatedAt: new Date(),
           tripay_reference: response.data.data.reference,
           tripay_merchant_ref: merchantRef
         }, { transaction });
@@ -178,7 +203,7 @@ const createTransaction = async (req, res) => {
       throw error;
     }
   } catch (error) {
-    console.error('Error creating transaction:', error);
+    console.error('Error membuat transaksi:', error);
     return res.status(500).json({ error: 'Gagal membuat transaksi' });
   }
 };
@@ -187,14 +212,15 @@ const createTransaction = async (req, res) => {
 const getTransactionDetail = async (req, res) => {
   try {
     const { reference } = req.params;
+    const config = await getTripayConfig();
 
     if (!reference) {
       return res.status(400).json({ error: 'Parameter tidak lengkap' });
     }
 
-    const response = await axios.get(`${TRIPAY_URL}/transaction/detail`, {
+    const response = await axios.get(`${config.baseUrl}/transaction/detail`, {
       headers: {
-        'Authorization': `Bearer ${TRIPAY_API_KEY}`
+        'Authorization': `Bearer ${config.apiKey}`
       },
       params: {
         reference
@@ -203,7 +229,7 @@ const getTransactionDetail = async (req, res) => {
 
     return res.status(200).json(response.data.data);
   } catch (error) {
-    console.error('Error getting transaction detail:', error);
+    console.error('Error mendapatkan detail transaksi:', error);
     return res.status(500).json({ error: 'Gagal mendapatkan detail transaksi' });
   }
 };
@@ -211,12 +237,14 @@ const getTransactionDetail = async (req, res) => {
 // Callback dari Tripay
 const handleCallback = async (req, res) => {
   try {
+    const config = await getTripayConfig();
+    
     // Validasi signature dari Tripay
     const callbackSignature = req.headers['x-callback-signature'];
     const json = req.body;
     
     const signature = crypto
-      .createHmac('sha256', TRIPAY_PRIVATE_KEY)
+      .createHmac('sha256', config.privateKey)
       .update(JSON.stringify(json))
       .digest('hex');
     
@@ -224,7 +252,7 @@ const handleCallback = async (req, res) => {
       return res.status(400).json({ error: 'Invalid signature' });
     }
     
-    // Process data pembayaran
+    // Proses data pembayaran
     const data = json;
     const reference = data.reference;
     const merchantRef = data.merchant_ref;
@@ -253,6 +281,13 @@ const handleCallback = async (req, res) => {
           payment_status: 'paid',
           updatedAt: new Date()
         }, { transaction });
+        
+        // Update user data untuk menandai bahwa mereka memiliki langganan aktif
+        const user = await User.findByPk(subscription.user_id, { transaction });
+        if (user) {
+          user.hasActiveSubscription = true;
+          await user.save({ transaction });
+        }
       } else if (status === 'EXPIRED' || status === 'FAILED') {
         await subscription.update({
           payment_status: 'failed',
@@ -268,8 +303,81 @@ const handleCallback = async (req, res) => {
       throw error;
     }
   } catch (error) {
-    console.error('Error handling callback:', error);
+    console.error('Error menangani callback:', error);
     return res.status(500).json({ error: 'Error processing callback' });
+  }
+};
+
+// Memeriksa status pembayaran secara manual
+const checkPaymentStatus = async (req, res) => {
+  try {
+    const { reference } = req.params;
+    const config = await getTripayConfig();
+    
+    if (!reference) {
+      return res.status(400).json({ error: 'Parameter reference tidak ditemukan' });
+    }
+    
+    // Ambil detail transaksi dari Tripay
+    const response = await axios.get(`${config.baseUrl}/transaction/detail`, {
+      headers: {
+        'Authorization': `Bearer ${config.apiKey}`
+      },
+      params: {
+        reference
+      }
+    });
+    
+    const status = response.data.data.status;
+    
+    // Update database jika status berubah
+    if (status === 'PAID' || status === 'EXPIRED' || status === 'FAILED') {
+      const subscription = await Subscription.findOne({
+        where: { tripay_reference: reference }
+      });
+      
+      if (subscription) {
+        if (status === 'PAID' && subscription.payment_status !== 'paid') {
+          await subscription.update({
+            payment_status: 'paid',
+            updatedAt: new Date()
+          });
+          
+          // Update user data
+          const user = await User.findByPk(subscription.user_id);
+          if (user) {
+            user.hasActiveSubscription = true;
+            await user.save();
+          }
+        } else if ((status === 'EXPIRED' || status === 'FAILED') && subscription.payment_status !== 'failed') {
+          await subscription.update({
+            payment_status: 'failed',
+            updatedAt: new Date()
+          });
+        }
+      }
+    }
+    
+    return res.status(200).json({
+      success: true,
+      data: response.data.data
+    });
+  } catch (error) {
+    console.error('Error memeriksa status pembayaran:', error);
+    return res.status(500).json({ error: 'Gagal memeriksa status pembayaran' });
+  }
+};
+
+// Mendapatkan status Tripay (aktif/nonaktif)
+const getTripayStatus = async (req, res) => {
+  try {
+    const tripayEnabled = await Setting.findOne({ where: { key: 'tripay_enabled' } });
+    return res.status(200).json({ 
+      enabled: tripayEnabled ? tripayEnabled.value === 'true' : false 
+    });
+  } catch (error) {
+    console.error('Error mendapatkan status Tripay:', error);
+    return res.status(500).json({ error: 'Gagal mendapatkan status Tripay' });
   }
 };
 
@@ -278,5 +386,7 @@ module.exports = {
   calculateFee,
   createTransaction,
   getTransactionDetail,
-  handleCallback
+  handleCallback,
+  checkPaymentStatus,
+  getTripayStatus
 };

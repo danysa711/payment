@@ -1,4 +1,5 @@
 // Perbaikan untuk express/server.js
+// Tambahkan rute baru dan hapus fallback manual payment methods
 
 const express = require("express");
 const cors = require("cors");
@@ -13,8 +14,7 @@ const userRoutes = require("./routes/userRoutes");
 const subscriptionRoutes = require("./routes/subscriptionRoutes");
 const tripayRoutes = require("./routes/tripayRoutes");
 const publicApiRoutes = require("./routes/publicApiRoutes");
-const settingsRoutes = require('./routes/settingsRoutes');
-const paymentMethodRoutes = require('./routes/paymentMethodRoutes');
+const settingsRoutes = require('./routes/settingsRoutes'); // Rute pengaturan
 
 const app = express();
 const PORT = process.env.PORT || 3500;
@@ -24,6 +24,9 @@ const corsOptions = {
   origin: function(origin, callback) {
     // Daftar domain yang diperbolehkan
     const allowedOrigins = [
+      "https://kinterstore.com",       
+      "https://www.kinterstore.com", 
+      "https://db.kinterstore.com",
       "https://kinterstore.my.id",       
       "https://www.kinterstore.my.id", 
       "https://db.kinterstore.my.id",
@@ -41,8 +44,6 @@ const corsOptions = {
       console.log('Origin rejected by CORS:', origin);
       // Izinkan semua origin untuk sementara selama debugging
       callback(null, true);
-      // Setelah debugging selesai, kembalikan ke:
-      // callback(new Error('Not allowed by CORS'));
     }
   },
   methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
@@ -51,11 +52,10 @@ const corsOptions = {
   optionsSuccessStatus: 200
 };
 
-// Tambahkan middleware untuk debugging CORS
+// Middleware untuk debug
 app.use((req, res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
   console.log('Request origin:', req.headers.origin);
-  console.log('Request headers:', req.headers);
   
   // Pastikan headers CORS selalu ditambahkan
   res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
@@ -88,10 +88,10 @@ app.use(cors(corsOptions));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// Tambahkan middleware khusus untuk preflight requests
+// Middleware khusus untuk preflight requests
 app.options('*', cors(corsOptions));
 
-// TAMBAHKAN HANDLER UNTUK ROOT PATH
+// Handler untuk root path
 app.get("/", (req, res) => {
   res.send(`
     <html>
@@ -121,11 +121,13 @@ app.get("/", (req, res) => {
           <strong>Environment:</strong> ${process.env.NODE_ENV || 'development'}
         </div>
 
+        <div>
+          <p>
             <strong>Database Status:</strong> 
             <span id="dbStatus">Checking...</span>
           </p>
           <script>
-            // Simple script to check database connection
+            // Script sederhana untuk memeriksa koneksi database
             fetch('/api/test')
               .then(response => response.json())
               .then(data => {
@@ -153,75 +155,6 @@ app.get("/api/test", (req, res) => {
   res.json({ message: "API is working", timestamp: new Date().toISOString() });
 });
 
-// Endpoint global untuk payment-methods
-app.get('/api/payment-methods', async (req, res) => {
-  try {
-    // Data default
-    let methods = [
-      // Manual methods (default)
-      {
-        code: 'MANUAL_1',
-        name: 'Transfer Bank BCA',
-        type: 'bank',
-        fee: 0,
-        isManual: true,
-        manualData: {
-          id: 1,
-          name: 'Transfer Bank BCA',
-          type: 'bank',
-          accountNumber: '1234567890',
-          accountName: 'PT Demo Store',
-          instructions: 'Transfer ke rekening BCA a/n PT Demo Store',
-          isActive: true
-        }
-      },
-      {
-        code: 'MANUAL_2',
-        name: 'QRIS',
-        type: 'qris',
-        fee: 0,
-        isManual: true,
-        manualData: {
-          id: 2,
-          name: 'QRIS',
-          type: 'qris',
-          qrImageUrl: 'https://example.com/qr.png',
-          instructions: 'Scan kode QR menggunakan aplikasi e-wallet atau mobile banking',
-          isActive: true
-        }
-      }
-    ];
-    
-    // Cek apakah Tripay diaktifkan
-    try {
-      const tripayEnabled = await db.Setting.findOne({ where: { key: 'tripay_enabled' } });
-      if (tripayEnabled && tripayEnabled.value === 'true') {
-        // Tambahkan metode Tripay
-        const tripayMethods = [
-          { code: 'QRIS', name: 'QRIS', type: 'qris', fee: 800 },
-          { code: 'BRIVA', name: 'Bank BRI', type: 'bank', fee: 4000 },
-          { code: 'MANDIRIVA', name: 'Bank Mandiri', type: 'bank', fee: 4000 },
-          { code: 'BNIVA', name: 'Bank BNI', type: 'bank', fee: 4000 },
-          { code: 'BCAVA', name: 'Bank BCA', type: 'bank', fee: 4000 },
-          { code: 'OVO', name: 'OVO', type: 'ewallet', fee: 2000 },
-          { code: 'DANA', name: 'DANA', type: 'ewallet', fee: 2000 },
-          { code: 'LINKAJA', name: 'LinkAja', type: 'ewallet', fee: 2000 },
-          { code: 'SHOPEEPAY', name: 'ShopeePay', type: 'ewallet', fee: 2000 }
-        ];
-        methods = [...tripayMethods, ...methods];
-      }
-    } catch (settingError) {
-      console.error('Error checking Tripay status:', settingError);
-      // Anggap Tripay tidak aktif
-    }
-    
-    res.json(methods);
-  } catch (error) {
-    console.error('Error in payment methods endpoint:', error);
-    res.status(500).json({ message: 'Server Error' });
-  }
-});
-
 // Routes
 app.use("/api", licenseRoutes);
 app.use("/api", softwareRoutes);
@@ -232,8 +165,7 @@ app.use("/api", userRoutes);
 app.use("/api", subscriptionRoutes);
 app.use("/api/tripay", tripayRoutes);
 app.use("/api/public", publicApiRoutes);
-app.use("/api", settingsRoutes);
-app.use("/api", paymentMethodRoutes);
+app.use("/api", settingsRoutes); // Tambahkan rute pengaturan
 
 // Error handling middleware
 app.use((err, req, res, next) => {
