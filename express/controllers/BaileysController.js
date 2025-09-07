@@ -1,599 +1,507 @@
-const { Boom } = require('@hapi/boom');
+// controllers/BaileysController.js
+const { User, QrisPayment, Subscription, SubscriptionPlan, db } = require("../models");
 const fs = require('fs');
 const path = require('path');
-const { sequelize } = require('../models');
-const db = require('../models/index');
-const QRCode = require('qrcode');
+const qrcode = require('qrcode');
+const { Boom } = require('@hapi/boom');
+const makeWASocket = require('@whiskeysockets/baileys').default;
+const { DisconnectReason, useMultiFileAuthState } = require('@whiskeysockets/baileys');
 
-let makeWASocket, DisconnectReason, useMultiFileAuthState;
+// Global WhatsApp connection
+global.waConnection = null;
 
-// Fungsi init untuk memuat modul ESM
-const loadBaileysModule = async () => {
+// Get WhatsApp settings
+const getSettings = async (req, res) => {
   try {
-    const baileys = await import('@whiskeysockets/baileys');
-    makeWASocket = baileys.default;
-    DisconnectReason = baileys.DisconnectReason;
-    useMultiFileAuthState = baileys.useMultiFileAuthState;
-    console.log('Baileys module loaded successfully');
-    return true;
-  } catch (err) {
-    console.error('Failed to load Baileys module:', err);
-    return false;
-  }
-};
-
-// Path untuk menyimpan session Baileys
-const SESSION_PATH = path.join(__dirname, '../baileys_session');
-
-// Membuat folder session jika belum ada
-if (!fs.existsSync(SESSION_PATH)) {
-  fs.mkdirSync(SESSION_PATH, { recursive: true });
-}
-
-let waSocket = null;
-let reconnectAttempts = 0;
-const MAX_RECONNECT_ATTEMPTS = 5;
-let qrCodeData = null;
-
-// Fungsi untuk menginisialisasi koneksi WhatsApp
-const initializeWhatsApp = async () => {
-  try {
-    // Ambil state autentikasi dari file
-    const { state, saveCreds } = await useMultiFileAuthState(SESSION_PATH);
-    
-    // Buat koneksi baru
-    waSocket = makeWASocket({
-      auth: state,
-      printQRInTerminal: true,
-      defaultQueryTimeoutMs: 60000,
-    });
-    
-    // Reset QR code
-    qrCodeData = null;
-    
-    // Handler untuk menyimpan kredensial
-    waSocket.ev.on('creds.update', saveCreds);
-    
-    // Handler untuk koneksi
-    waSocket.ev.on('connection.update', async (update) => {
-      const { connection, lastDisconnect, qr } = update;
-      
-      // Simpan QR code jika tersedia
-      if (qr) {
-        try {
-          qrCodeData = await QRCode.toDataURL(qr);
-          console.log('QR Code diperbarui');
-        } catch (qrErr) {
-          console.error('Error saat membuat QR Code:', qrErr);
-        }
-      }
-      
-      if (connection === 'close') {
-        const shouldReconnect = 
-          (lastDisconnect?.error instanceof Boom)? 
-          lastDisconnect.error.output.statusCode !== DisconnectReason.loggedOut : true;
-        
-        console.log('Koneksi WhatsApp terputus karena:', lastDisconnect?.error?.message || 'Alasan tidak diketahui');
-        
-        // Update status di database
-        await db.sequelize.query(
-          'UPDATE wa_baileys_config SET is_connected = ? WHERE id = ?',
-          {
-            replacements: [false, 1],
-            type: db.sequelize.QueryTypes.UPDATE
-          }
-        );
-        
-        // Coba reconnect jika bukan karena logout
-        if (shouldReconnect && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-          reconnectAttempts++;
-          console.log(`Mencoba menghubungkan kembali (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
-          setTimeout(initializeWhatsApp, 5000);
-        } else if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-          console.log('Batas percobaan koneksi ulang tercapai');
-        }
-      } else if (connection === 'open') {
-        console.log('WhatsApp berhasil terhubung!');
-        reconnectAttempts = 0;
-        
-        // Reset QR Code
-        qrCodeData = null;
-        
-        // Update status di database
-        await db.sequelize.query(
-          'UPDATE wa_baileys_config SET is_connected = ? WHERE id = ?',
-          {
-            replacements: [true, 1],
-            type: db.sequelize.QueryTypes.UPDATE
-          }
-        );
-        
-        // Dapatkan info nomor WhatsApp
-        const [waNumber] = waSocket.user.id.split(':');
-        await db.sequelize.query(
-          'UPDATE wa_baileys_config SET wa_number = ? WHERE id = ?',
-          {
-            replacements: [waNumber, 1],
-            type: db.sequelize.QueryTypes.UPDATE
-          }
-        );
-      }
-    });
-    
-    // Handler untuk pesan
-    waSocket.ev.on('messages.upsert', async (m) => {
-      try {
-        if (m.type !== 'notify') return;
-        
-        const msg = m.messages[0];
-        if (!msg.message) return;
-        
-        // Cek apakah pesan dari grup
-        const [settings] = await db.sequelize.query(
-          'SELECT group_id FROM wa_baileys_config WHERE id = ?',
-          {
-            replacements: [1],
-            type: db.sequelize.QueryTypes.SELECT
-          }
-        );
-        
-        const groupId = settings?.group_id;
-        
-        if (msg.key.remoteJid === groupId) {
-          // Proses pesan grup untuk verifikasi pembayaran
-          await processGroupMessage(msg);
-        }
-      } catch (error) {
-        console.error('Error saat memproses pesan:', error);
-      }
-    });
-    
-    return waSocket;
-  } catch (error) {
-    console.error('Error saat inisialisasi WhatsApp:', error);
-    throw error;
-  }
-};
-
-// Fungsi untuk memproses pesan dari grup
-const processGroupMessage = async (msg) => {
-  try {
-    // Ambil pesan
-    const messageContent = msg.message.conversation || 
-                          msg.message.extendedTextMessage?.text || 
-                          '';
-    
-    // Periksa apakah ini adalah respon verifikasi (1 atau 2)
-    if (messageContent === '1' || messageContent === '2') {
-      // Cek apakah pesan ini adalah balasan
-      const quotedMsg = msg.message.extendedTextMessage?.contextInfo?.quotedMessage;
-      if (!quotedMsg) return;
-      
-      // Ambil pesan yang dibalas
-      const quotedText = quotedMsg.conversation || 
-                        quotedMsg.extendedTextMessage?.text || 
-                        '';
-      
-      // Ekstrak reference_id dari pesan yang dibalas
-      const refMatch = quotedText.match(/Nomor Pesanan: ([A-Z0-9-]+)/);
-      if (!refMatch) return;
-      
-      const referenceId = refMatch[1];
-      
-      // Cari pembayaran berdasarkan reference_id
-      const [payment] = await db.sequelize.query(
-        'SELECT id FROM qris_payments WHERE payment_ref = ?',
-        {
-          replacements: [referenceId],
-          type: db.sequelize.QueryTypes.SELECT
-        }
-      );
-      
-      if (!payment) return;
-      
-      if (messageContent === '1') {
-        // Verifikasi pembayaran
-        await verifyPayment(payment.id, 'whatsapp', msg.key.participant.split('@')[0]);
-        
-        // Kirim pesan konfirmasi ke grup
-        await waSocket.sendMessage(msg.key.remoteJid, {
-          text: `✅ Pembayaran dengan nomor referensi ${referenceId} telah diverifikasi.`
-        });
-      } else if (messageContent === '2') {
-        // Tolak pembayaran
-        await rejectPayment(payment.id, 'whatsapp', msg.key.participant.split('@')[0]);
-        
-        // Kirim pesan konfirmasi ke grup
-        await waSocket.sendMessage(msg.key.remoteJid, {
-          text: `❌ Pembayaran dengan nomor referensi ${referenceId} telah ditolak.`
-        });
-      }
-    }
-  } catch (error) {
-    console.error('Error saat memproses pesan grup:', error);
-  }
-};
-
-// Fungsi untuk verifikasi pembayaran
-const verifyPayment = async (paymentId, method, verifiedBy) => {
-  const transaction = await db.sequelize.transaction();
-  
-  try {
-    // Dapatkan data pembayaran
-    const [payment] = await db.sequelize.query(
-      'SELECT p.*, u.id as user_id, sp.duration_days FROM qris_payments p ' +
-      'JOIN Users u ON p.user_id = u.id ' +
-      'JOIN SubscriptionPlans sp ON p.plan_id = sp.id ' +
-      'WHERE p.id = ? AND p.payment_state = "pending"',
-      {
-        replacements: [paymentId],
-        type: db.sequelize.QueryTypes.SELECT,
-        transaction
-      }
-    );
-    
-    if (!payment) {
-      throw new Error('Pembayaran tidak ditemukan atau tidak dalam status pending');
+    // Verify admin
+    if (req.userRole !== "admin") {
+      return res.status(403).json({ error: "Tidak memiliki izin" });
     }
     
-    // Update status pembayaran
-    await db.sequelize.query(
-      'UPDATE qris_payments SET ' +
-      'payment_state = "verified", ' +
-      'verified_at = NOW(), ' +
-      'verified_by = ?, ' +
-      'verification_method = ? ' +
-      'WHERE id = ?',
-      {
-        replacements: [verifiedBy, method, paymentId],
-        type: db.sequelize.QueryTypes.UPDATE,
-        transaction
-      }
-    );
+    // Get Baileys settings
+    const settings = await db.BaileysSettings.findOne({
+      order: [['id', 'DESC']]
+    });
     
-    // Cek apakah user sudah memiliki langganan aktif
-    const [activeSubscription] = await db.sequelize.query(
-      'SELECT id, end_date FROM Subscriptions ' +
-      'WHERE user_id = ? AND status = "active" AND end_date > NOW()',
-      {
-        replacements: [payment.user_id],
-        type: db.sequelize.QueryTypes.SELECT,
-        transaction
-      }
-    );
-    
-    if (activeSubscription) {
-      // Perpanjang langganan yang ada
-      const newEndDate = new Date(activeSubscription.end_date);
-      newEndDate.setDate(newEndDate.getDate() + payment.duration_days);
-      
-      await db.sequelize.query(
-        'UPDATE Subscriptions SET ' +
-        'end_date = ?, ' +
-        'payment_status = "paid" ' +
-        'WHERE id = ?',
-        {
-          replacements: [newEndDate, activeSubscription.id],
-          type: db.sequelize.QueryTypes.UPDATE,
-          transaction
-        }
-      );
+    if (settings) {
+      return res.status(200).json({
+        phoneNumber: settings.phone_number,
+        groupName: settings.group_name,
+        notificationEnabled: settings.notification_enabled,
+        templateMessage: settings.template_message,
+        status: global.waConnection && global.waConnection.isConnected ? 'connected' : 'disconnected'
+      });
     } else {
-      // Buat langganan baru
-      const startDate = new Date();
-      const endDate = new Date();
-      endDate.setDate(endDate.getDate() + payment.duration_days);
-      
-      await db.sequelize.query(
-        'INSERT INTO Subscriptions ' +
-        '(user_id, start_date, end_date, status, payment_status, payment_method, createdAt, updatedAt) ' +
-        'VALUES (?, ?, ?, "active", "paid", "qris", NOW(), NOW())',
-        {
-          replacements: [payment.user_id, startDate, endDate],
-          type: db.sequelize.QueryTypes.INSERT,
-          transaction
-        }
-      );
+      return res.status(200).json({
+        phoneNumber: '',
+        groupName: '',
+        notificationEnabled: true,
+        templateMessage: 'Permintaan pembayaran baru dari {username} ({email}) dengan nominal Rp {amount} untuk paket {plan_name}. Nomor pesanan: {order_number}. Balas *1* untuk verifikasi atau *2* untuk tolak.',
+        status: 'disconnected'
+      });
     }
-    
-    await transaction.commit();
-    return true;
   } catch (error) {
-    await transaction.rollback();
-    console.error('Error saat verifikasi pembayaran:', error);
-    throw error;
+    console.error("Error getting WhatsApp settings:", error);
+    return res.status(500).json({ error: "Terjadi kesalahan pada server" });
   }
 };
 
-// Fungsi untuk menolak pembayaran
-const rejectPayment = async (paymentId, method, rejectedBy) => {
+// Save WhatsApp settings
+const saveSettings = async (req, res) => {
   try {
-    // Dapatkan data pembayaran
-    const [payment] = await db.sequelize.query(
-      'SELECT * FROM qris_payments WHERE id = ? AND payment_state = "pending"',
-      {
-        replacements: [paymentId],
-        type: db.sequelize.QueryTypes.SELECT
-      }
-    );
-    
-    if (!payment) {
-      throw new Error('Pembayaran tidak ditemukan atau tidak dalam status pending');
+    // Verify admin
+    if (req.userRole !== "admin") {
+      return res.status(403).json({ error: "Tidak memiliki izin" });
     }
     
-    // Update status pembayaran
-    await db.sequelize.query(
-      'UPDATE qris_payments SET ' +
-      'payment_state = "rejected", ' +
-      'verified_at = NOW(), ' +
-      'verified_by = ?, ' +
-      'verification_method = ? ' +
-      'WHERE id = ?',
-      {
-        replacements: [rejectedBy, method, paymentId],
-        type: db.sequelize.QueryTypes.UPDATE
-      }
-    );
+    const { phoneNumber, groupName, notificationEnabled, templateMessage } = req.body;
     
-    return true;
-  } catch (error) {
-    console.error('Error saat menolak pembayaran:', error);
-    throw error;
-  }
-};
-
-// Fungsi untuk mengirim notifikasi pembayaran ke grup
-const sendPaymentNotification = async (payment) => {
-  try {
-    if (!waSocket) {
-      throw new Error('WhatsApp belum terhubung');
+    // Validate input
+    if (!phoneNumber) {
+      return res.status(400).json({ error: "Nomor WhatsApp harus diisi" });
     }
     
-    // Ambil pengaturan Baileys
-    const [settings] = await db.sequelize.query(
-      'SELECT group_id, wa_message_template FROM wa_baileys_config JOIN qris_settings ON 1=1 LIMIT 1',
-      {
-        type: db.sequelize.QueryTypes.SELECT
-      }
-    );
-    
-    if (!settings || !settings.group_id) {
-      throw new Error('ID grup WhatsApp belum dikonfigurasi');
+    if (!groupName) {
+      return res.status(400).json({ error: "Nama grup harus diisi" });
     }
     
-    // Ambil data user dan paket langganan
-    const [user] = await db.sequelize.query(
-      'SELECT username, email FROM Users WHERE id = ?',
-      {
-        replacements: [payment.user_id],
-        type: db.sequelize.QueryTypes.SELECT
-      }
-    );
-    
-    const [plan] = await db.sequelize.query(
-      'SELECT name FROM SubscriptionPlans WHERE id = ?',
-      {
-        replacements: [payment.plan_id],
-        type: db.sequelize.QueryTypes.SELECT
-      }
-    );
-    
-    if (!user || !plan) {
-      throw new Error('Data user atau paket langganan tidak ditemukan');
+    if (!templateMessage) {
+      return res.status(400).json({ error: "Template pesan harus diisi" });
     }
     
-    // Format pesan notifikasi
-    const message = `*VERIFIKASI PEMBAYARAN*\n\n` +
-                   `Username: ${user.username}\n` +
-                   `Email: ${user.email}\n` +
-                   `Paket: ${plan.name}\n` +
-                   `Nominal Transfer: Rp ${payment.total_amount.toLocaleString('id-ID')}\n` +
-                   `Nomor Pesanan: ${payment.payment_ref}\n\n` +
-                   `Balas '1' untuk verifikasi\n` +
-                   `Balas '2' untuk tolak`;
-    
-    // Kirim pesan ke grup
-    await waSocket.sendMessage(settings.group_id, { text: message });
-    
-    return true;
-  } catch (error) {
-    console.error('Error saat mengirim notifikasi:', error);
-    throw error;
-  }
-};
-
-// Controller untuk mendapatkan QR code
-const getQRCode = async (req, res) => {
-  try {
-    if (!qrCodeData) {
-      return res.status(404).json({ error: 'QR Code belum tersedia' });
-    }
-    
-    return res.status(200).json({ qrCode: qrCodeData });
-  } catch (error) {
-    console.error('Error saat mendapatkan QR Code:', error);
-    return res.status(500).json({ error: 'Terjadi kesalahan saat mendapatkan QR Code' });
-  }
-};
-
-// Controller untuk scan QR dan login WhatsApp
-const getLoginStatus = async (req, res) => {
-  try {
-    // Cek ketersediaan koneksi WhatsApp terlebih dahulu
-    const connStatus = {
-      isConnected: waSocket ? true : false,
-      whatsappNumber: waSocket?.user?.id ? waSocket.user.id.split(':')[0] : '',
-      groupId: '',
-      groupName: '',
-      qrCode: waSocket ? null : qrCodeData
-    };
-    
-    // Periksa apakah db dan sequelize tersedia
-    if (!db || !db.sequelize || typeof db.sequelize.query !== 'function') {
-      console.log('Database not properly initialized in getLoginStatus');
-      return res.status(200).json(connStatus);
-    }
-    
-    try {
-      // Query database jika tersedia
-      const [settings] = await db.sequelize.query(
-        'SELECT is_connected, wa_number, group_id, group_name FROM wa_baileys_config WHERE id = 1',
-        {
-          type: db.sequelize.QueryTypes.SELECT
-        }
-      );
-      
-      if (settings) {
-        return res.status(200).json({
-          isConnected: settings.is_connected || connStatus.isConnected,
-          whatsappNumber: settings.wa_number || connStatus.whatsappNumber,
-          groupId: settings.group_id || '',
-          groupName: settings.group_name || '',
-          qrCode: !settings.is_connected ? qrCodeData : null
-        });
-      } else {
-        return res.status(200).json(connStatus);
-      }
-    } catch (dbError) {
-      console.error('Database query error:', dbError);
-      return res.status(200).json(connStatus);
-    }
-  } catch (error) {
-    console.error('Error saat mendapatkan status login:', error);
-    // Berikan respons fallback jika terjadi error
-    return res.status(200).json({ 
-      isConnected: waSocket ? true : false,
-      whatsappNumber: waSocket?.user?.id ? waSocket.user.id.split(':')[0] : '',
-      groupId: '',
-      groupName: '',
-      qrCode: waSocket ? null : qrCodeData
+    // Get existing settings
+    let settings = await db.BaileysSettings.findOne({
+      order: [['id', 'DESC']]
     });
-  }
-};
-
-// Controller untuk logout WhatsApp
-const logout = async (req, res) => {
-  try {
-    if (waSocket) {
-      await waSocket.logout();
-      waSocket = null;
-      
-      // Hapus semua file sesi
-      fs.rmSync(SESSION_PATH, { recursive: true, force: true });
-      fs.mkdirSync(SESSION_PATH, { recursive: true });
-      
-      // Update status di database
-      await db.sequelize.query(
-        'UPDATE wa_baileys_config SET is_connected = false WHERE id = 1',
-        {
-          type: db.sequelize.QueryTypes.UPDATE
-        }
-      );
-    }
     
-    return res.status(200).json({ message: 'Berhasil logout dari WhatsApp' });
-  } catch (error) {
-    console.error('Error saat logout WhatsApp:', error);
-    return res.status(500).json({ error: 'Terjadi kesalahan saat logout WhatsApp' });
-  }
-};
-
-// Controller untuk update pengaturan grup WhatsApp
-const updateGroupSettings = async (req, res) => {
-  try {
-    const { groupId, groupName } = req.body;
-    
-    if (!waSocket) {
-      return res.status(400).json({ error: 'WhatsApp belum terhubung' });
-    }
-    
-    // Validasi apakah group_id valid
-    try {
-      const groupMetadata = await waSocket.groupMetadata(groupId);
-      if (!groupMetadata) {
-        return res.status(400).json({ error: 'ID grup tidak valid atau WhatsApp tidak memiliki akses ke grup tersebut' });
-      }
-    } catch (error) {
-      return res.status(400).json({ error: 'ID grup tidak valid atau WhatsApp tidak memiliki akses ke grup tersebut' });
-    }
-    
-    // Update pengaturan grup
-    await db.sequelize.query(
-      'UPDATE wa_baileys_config SET group_id = ?, group_name = ? WHERE id = 1',
-      {
-        replacements: [groupId, groupName],
-        type: db.sequelize.QueryTypes.UPDATE
-      }
-    );
-    
-    return res.status(200).json({ message: 'Pengaturan grup berhasil diperbarui' });
-  } catch (error) {
-    console.error('Error saat update pengaturan grup:', error);
-    return res.status(500).json({ error: 'Terjadi kesalahan saat memperbarui pengaturan grup' });
-  }
-};
-
-// Controller untuk mendapatkan daftar grup
-const getGroups = async (req, res) => {
-  try {
-    if (!waSocket) {
-      return res.status(400).json({ error: 'WhatsApp belum terhubung' });
-    }
-    
-    // Ambil daftar grup
-    const groups = [];
-    const chats = await waSocket.groupFetchAllParticipating();
-    
-    for (const [id, chat] of Object.entries(chats)) {
-      groups.push({
-        id: id,
-        name: chat.subject || 'Grup tanpa nama',
-        participants: chat.participants.length
+    if (settings) {
+      // Update existing settings
+      await settings.update({
+        phone_number: phoneNumber,
+        group_name: groupName,
+        notification_enabled: notificationEnabled !== false,
+        template_message: templateMessage
+      });
+    } else {
+      // Create new settings
+      settings = await db.BaileysSettings.create({
+        phone_number: phoneNumber,
+        group_name: groupName,
+        notification_enabled: notificationEnabled !== false,
+        template_message: templateMessage
       });
     }
     
-    return res.status(200).json({ groups });
+    return res.status(200).json({
+      success: true,
+      message: "Pengaturan WhatsApp berhasil disimpan"
+    });
   } catch (error) {
-    console.error('Error saat mendapatkan daftar grup:', error);
-    return res.status(500).json({ error: 'Terjadi kesalahan saat mendapatkan daftar grup' });
+    console.error("Error saving WhatsApp settings:", error);
+    return res.status(500).json({ error: "Terjadi kesalahan pada server" });
   }
 };
 
-// Controller untuk menginisialisasi WhatsApp
-const initialize = async (req, res) => {
+// Connect WhatsApp
+const connect = async (req, res) => {
   try {
-    // Inisialisasi data baileys jika belum ada
-    const [baileysSetting] = await db.sequelize.query(
-      'SELECT id FROM wa_baileys_config WHERE id = 1',
-      { type: db.sequelize.QueryTypes.SELECT }
-    );
-    
-    if (!baileysSetting) {
-      await db.sequelize.query(
-        'INSERT INTO wa_baileys_config (id, wa_number, is_connected, created_at, updated_at) VALUES (1, "", 0, NOW(), NOW())',
-        { type: db.sequelize.QueryTypes.INSERT }
-      );
+    // Verify admin
+    if (req.userRole !== "admin") {
+      return res.status(403).json({ error: "Tidak memiliki izin" });
     }
     
-    // Inisialisasi WhatsApp
-    await initializeWhatsApp();
+    // Get Baileys settings
+    const settings = await db.BaileysSettings.findOne({
+      order: [['id', 'DESC']]
+    });
     
-    return res.status(200).json({ message: 'Proses inisialisasi WhatsApp dimulai, silakan scan QR code' });
+    if (!settings || !settings.phone_number) {
+      return res.status(400).json({ error: "Pengaturan WhatsApp belum dikonfigurasi" });
+    }
+    
+    // Create auth directory if not exists
+    const authDir = path.join(__dirname, '../baileys_auth');
+    if (!fs.existsSync(authDir)) {
+      fs.mkdirSync(authDir, { recursive: true });
+    }
+    
+    // Use auth state
+    const { state, saveCreds } = await useMultiFileAuthState(authDir);
+    
+    // Create WhatsApp socket
+    const sock = makeWASocket({
+      auth: state,
+      printQRInTerminal: true
+    });
+    
+    // Listen for QR code
+    let qr = null;
+    sock.ev.on('connection.update', async (update) => {
+      const { connection, lastDisconnect, qr: newQr } = update;
+      
+      if (newQr) {
+        // Generate QR code as data URL
+        qr = await qrcode.toDataURL(newQr);
+        
+        // Extract base64 data
+        qr = qr.split(',')[1];
+        
+        // Send QR code to client if we're still waiting for response
+        if (!res.headersSent) {
+          return res.status(200).json({
+            qrCode: qr
+          });
+        }
+      }
+      
+      if (connection === 'open') {
+        console.log('WhatsApp connected!');
+        
+        // Save connection to global
+        global.waConnection = {
+          sock,
+          isConnected: true,
+          
+          // Helper method to send group message
+          sendGroupMessage: async (groupName, message) => {
+            try {
+              // Get groups
+              const groups = await sock.groupFetchAllParticipating();
+              
+              // Find group by name
+              const group = Object.values(groups).find(g => 
+                g.subject.toLowerCase() === groupName.toLowerCase()
+              );
+              
+              if (!group) {
+                throw new Error(`Group "${groupName}" not found`);
+              }
+              
+              // Send message to group
+              await sock.sendMessage(group.id, { text: message });
+              return true;
+            } catch (error) {
+              console.error("Error sending group message:", error);
+              throw error;
+            }
+          }
+        };
+        
+        // Log connection
+        await db.BaileysLog.create({
+          type: 'connection',
+          status: 'success',
+          message: `WhatsApp connected with number ${sock.user.id}`
+        });
+      }
+      
+      if (connection === 'close') {
+        // Log disconnection
+        await db.BaileysLog.create({
+          type: 'connection',
+          status: 'failed',
+          message: `WhatsApp connection closed: ${lastDisconnect?.error?.message || 'Unknown reason'}`
+        });
+        
+        // Reset global connection
+        global.waConnection = null;
+        
+        // Fix: Removed TypeScript type casting
+        const statusCode = lastDisconnect?.error?.output?.statusCode;
+        
+        // Reconnect if not logged out
+        if (statusCode !== DisconnectReason.loggedOut) {
+          console.log('Reconnecting WhatsApp...');
+        } else {
+          console.log('WhatsApp logged out');
+        }
+      }
+    });
+    
+    // Save credentials
+    sock.ev.on('creds.update', saveCreds);
+    
+    // Listen for messages
+    sock.ev.on('messages.upsert', async ({ messages }) => {
+      for (const message of messages) {
+        if (message.key.fromMe) continue;
+        
+        // Process group messages
+        if (message.key.remoteJid?.endsWith('@g.us') && message.message?.conversation) {
+          const messageText = message.message.conversation.trim();
+          
+          // Check if this is a verification response (1 or 2)
+          if (messageText === '1' || messageText === '2') {
+            await processVerificationResponse(message.key.remoteJid, message.key.participant, messageText);
+          }
+        }
+      }
+    });
+    
+    // If no QR code within 10 seconds, return error
+    setTimeout(() => {
+      if (!qr && !res.headersSent) {
+        return res.status(408).json({ error: "Timeout waiting for QR code" });
+      }
+    }, 10000);
+    
   } catch (error) {
-    console.error('Error saat inisialisasi WhatsApp:', error);
-    return res.status(500).json({ error: 'Terjadi kesalahan saat inisialisasi WhatsApp' });
+    console.error("Error connecting WhatsApp:", error);
+    
+    // Log error
+    await db.BaileysLog.create({
+      type: 'connection',
+      status: 'failed',
+      message: `Error connecting WhatsApp: ${error.message}`
+    });
+    
+    return res.status(500).json({ error: "Terjadi kesalahan pada server" });
+  }
+};
+
+// Disconnect WhatsApp
+const disconnect = async (req, res) => {
+  try {
+    // Verify admin
+    if (req.userRole !== "admin") {
+      return res.status(403).json({ error: "Tidak memiliki izin" });
+    }
+    
+    if (!global.waConnection || !global.waConnection.isConnected) {
+      return res.status(400).json({ error: "WhatsApp tidak terhubung" });
+    }
+    
+    // Disconnect WhatsApp
+    await global.waConnection.sock.logout();
+    global.waConnection = null;
+    
+    // Log disconnection
+    await db.BaileysLog.create({
+      type: 'connection',
+      status: 'success',
+      message: 'WhatsApp disconnected by admin'
+    });
+    
+    return res.status(200).json({
+      success: true,
+      message: "WhatsApp berhasil diputuskan"
+    });
+  } catch (error) {
+    console.error("Error disconnecting WhatsApp:", error);
+    
+    // Log error
+    await db.BaileysLog.create({
+      type: 'connection',
+      status: 'failed',
+      message: `Error disconnecting WhatsApp: ${error.message}`
+    });
+    
+    return res.status(500).json({ error: "Terjadi kesalahan pada server" });
+  }
+};
+
+// Check WhatsApp connection status
+const getStatus = async (req, res) => {
+  try {
+    // Verify admin
+    if (req.userRole !== "admin") {
+      return res.status(403).json({ error: "Tidak memiliki izin" });
+    }
+    
+    return res.status(200).json({
+      status: global.waConnection && global.waConnection.isConnected ? 'connected' : 'disconnected'
+    });
+  } catch (error) {
+    console.error("Error checking WhatsApp status:", error);
+    return res.status(500).json({ error: "Terjadi kesalahan pada server" });
+  }
+};
+
+// Get WhatsApp logs
+const getLogs = async (req, res) => {
+  try {
+    // Verify admin
+    if (req.userRole !== "admin") {
+      return res.status(403).json({ error: "Tidak memiliki izin" });
+    }
+    
+    // Get logs
+    const logs = await db.BaileysLog.findAll({
+      order: [['createdAt', 'DESC']],
+      limit: 100
+    });
+    
+    return res.status(200).json(logs);
+  } catch (error) {
+    console.error("Error getting WhatsApp logs:", error);
+    return res.status(500).json({ error: "Terjadi kesalahan pada server" });
+  }
+};
+
+// Process verification response from WhatsApp
+const processVerificationResponse = async (groupJid, senderJid, response) => {
+  try {
+    // Get latest pending payment
+    const pendingPayment = await QrisPayment.findOne({
+      where: {
+        status: 'waiting_verification'
+      },
+      order: [['created_at', 'DESC']]
+    });
+    
+    if (!pendingPayment) {
+      console.log("No pending payment found for verification");
+      return;
+    }
+    
+    // Process response
+    if (response === '1') {
+      // Verify payment
+      await pendingPayment.update({
+        status: 'verified',
+        verified_at: new Date()
+      });
+      
+      // Get user and plan
+      const user = await User.findByPk(pendingPayment.user_id);
+      const plan = await SubscriptionPlan.findByPk(pendingPayment.plan_id);
+      
+      if (!user || !plan) {
+        console.error("User or plan not found for verification");
+        return;
+      }
+      
+      // Check if user has active subscription
+      const activeSubscription = await Subscription.findOne({
+        where: {
+          user_id: pendingPayment.user_id,
+          status: "active",
+          end_date: {
+            [db.Sequelize.Op.gt]: new Date()
+          }
+        }
+      });
+      
+      if (activeSubscription) {
+        // Extend existing subscription
+        const newEndDate = new Date(activeSubscription.end_date);
+        newEndDate.setDate(newEndDate.getDate() + plan.duration_days);
+        
+        await activeSubscription.update({
+          end_date: newEndDate,
+          payment_status: "paid",
+          payment_method: "QRIS"
+        });
+      } else {
+        // Create new subscription
+        const startDate = new Date();
+        const endDate = new Date();
+        endDate.setDate(endDate.getDate() + plan.duration_days);
+        
+        await Subscription.create({
+          user_id: pendingPayment.user_id,
+          start_date: startDate,
+          end_date: endDate,
+          status: "active",
+          payment_status: "paid",
+          payment_method: "QRIS"
+        });
+      }
+      
+      // Log verification
+      await db.BaileysLog.create({
+        type: 'verification',
+        status: 'success',
+        message: `Pembayaran #${pendingPayment.order_number} diverifikasi melalui WhatsApp`,
+        data: {
+          payment_id: pendingPayment.id,
+          order_number: pendingPayment.order_number,
+          user_id: pendingPayment.user_id,
+          username: user.username,
+          sender: senderJid
+        }
+      });
+      
+      // Send confirmation message
+      if (global.waConnection && global.waConnection.isConnected) {
+        const settings = await db.BaileysSettings.findOne({
+          order: [['id', 'DESC']]
+        });
+        
+        if (settings) {
+          await global.waConnection.sendGroupMessage(
+            settings.group_name,
+            `✅ Pembayaran #${pendingPayment.order_number} dari ${user.username} (${user.email}) sebesar Rp ${pendingPayment.amount.toLocaleString('id-ID')} telah berhasil diverifikasi.`
+          );
+        }
+      }
+      
+    } else if (response === '2') {
+      // Reject payment
+      await pendingPayment.update({
+        status: 'rejected',
+        rejected_at: new Date()
+      });
+      
+      // Get user
+      const user = await User.findByPk(pendingPayment.user_id);
+      
+      if (!user) {
+        console.error("User not found for rejection");
+        return;
+      }
+      
+      // Log rejection
+      await db.BaileysLog.create({
+        type: 'verification',
+        status: 'failed',
+        message: `Pembayaran #${pendingPayment.order_number} ditolak melalui WhatsApp`,
+        data: {
+          payment_id: pendingPayment.id,
+          order_number: pendingPayment.order_number,
+          user_id: pendingPayment.user_id,
+          username: user.username,
+          sender: senderJid
+        }
+      });
+      
+      // Send rejection message
+      if (global.waConnection && global.waConnection.isConnected) {
+        const settings = await db.BaileysSettings.findOne({
+          order: [['id', 'DESC']]
+        });
+        
+        if (settings) {
+          await global.waConnection.sendGroupMessage(
+            settings.group_name,
+            `❌ Pembayaran #${pendingPayment.order_number} dari ${user.username} (${user.email}) sebesar Rp ${pendingPayment.amount.toLocaleString('id-ID')} telah ditolak.`
+          );
+        }
+      }
+    }
+  } catch (err) {
+    console.error("Error processing verification response:", err);
+    
+    // Log error
+    await db.BaileysLog.create({
+      type: 'verification',
+      status: 'failed',
+      message: `Error saat memproses verifikasi: ${err.message}`,
+      data: {
+        error: err.message,
+        groupJid,
+        senderJid,
+        response
+      }
+    });
   }
 };
 
 module.exports = {
-  initializeWhatsApp,
-  sendPaymentNotification,
-  verifyPayment,
-  rejectPayment,
-  getQRCode,
-  getLoginStatus,
-  logout,
-  updateGroupSettings,
-  getGroups,
-  initialize
+  getSettings,
+  saveSettings,
+  connect,
+  disconnect,
+  getStatus,
+  getLogs
 };

@@ -1,524 +1,384 @@
 import React, { useState, useEffect } from 'react';
 import { 
-  Card, Typography, Button, Form, Input, Select, Switch, 
-  Divider, Steps, Alert, Space, Table, Tag, Modal, Spin, 
-  Upload, message, Row, Col, Tabs, Descriptions, Image
+  Card, Typography, Form, Input, Button, message, 
+  Space, Divider, Alert, Switch, Spin, Tabs
 } from 'antd';
-import { 
-  WhatsAppOutlined, QrcodeOutlined, UserOutlined, 
-  LogoutOutlined, UploadOutlined, UsergroupAddOutlined,
-  SyncOutlined, CheckCircleOutlined, CloseCircleOutlined,
-  InfoCircleOutlined
-} from '@ant-design/icons';
+import { SaveOutlined, PhoneOutlined, WhatsAppOutlined, MessageOutlined } from '@ant-design/icons';
 import axiosInstance from '../../services/axios';
 
 const { Title, Text, Paragraph } = Typography;
-const { Option } = Select;
-const { TabPane } = Tabs;
-const { Step } = Steps;
 const { TextArea } = Input;
+const { TabPane } = Tabs;
 
 const WhatsAppSettings = () => {
+  // State untuk semua pengaturan
+  const [whatsappNumber, setWhatsappNumber] = useState('6281284712684');
+  const [trialEnabled, setTrialEnabled] = useState(true);
+  const [messageTemplate, setMessageTemplate] = useState('Halo, saya {username} ({email}) ingin request trial dengan URL: {url_slug}');
   const [loading, setLoading] = useState(false);
-  const [whatsappStatus, setWhatsappStatus] = useState({
-    isConnected: false,
-    whatsappNumber: '',
-    groupId: '',
-    groupName: ''
-  });
-  const [qrCodeData, setQrCodeData] = useState(null);
-  const [groups, setGroups] = useState([]);
-  const [loadingGroups, setLoadingGroups] = useState(false);
-  const [paymentSettings, setPaymentSettings] = useState({
-    timeout_seconds: 3600,
-    max_pending_transactions: 3,
-    qris_image_path: null,
-    qris_merchant_name: 'KinterStore',
-    wa_message_template: 'Balas 1 untuk verifikasi, 2 untuk tolak'
-  });
-  const [uploadLoading, setUploadLoading] = useState(false);
-  const [activeTab, setActiveTab] = useState('1');
-  const [groupForm] = Form.useForm();
-  const [settingsForm] = Form.useForm();
-
-  // Fetch WhatsApp status
-  const fetchWhatsAppStatus = async () => {
-    try {
-      setLoading(true);
-      const response = await axiosInstance.get('/api/baileys/status');
-      setWhatsappStatus(response.data);
-      
-      // Jika tidak terhubung, coba dapatkan QR code
-      if (!response.data.isConnected) {
-        fetchQRCode();
-      } else {
-        setQrCodeData(null);
-      }
-    } catch (error) {
-      console.error('Error fetching WhatsApp status:', error);
-      message.error('Gagal mengambil status WhatsApp');
-    } finally {
-      setLoading(false);
-    }
+  const [fetchLoading, setFetchLoading] = useState(true);
+  
+  // Data untuk preview
+  const previewData = {
+    username: 'john_doe',
+    email: 'john@example.com',
+    url_slug: 'john-doe-abc123'
   };
 
-  // Fetch QR code
-  const fetchQRCode = async () => {
-    try {
-      const response = await axiosInstance.get('/api/baileys/qrcode');
-      if (response.data.qrCode) {
-        setQrCodeData(response.data.qrCode);
-      }
-    } catch (error) {
-      console.error('Error fetching QR code:', error);
-      // Tidak perlu menampilkan error, karena QR code memang bisa tidak tersedia
-    }
-  };
-
-  // Fetch payment settings
-  const fetchPaymentSettings = async () => {
-    try {
-      setLoading(true);
-      const response = await axiosInstance.get('/api/qris/settings');
-      setPaymentSettings(response.data.settings);
-      settingsForm.setFieldsValue({
-        timeout_seconds: response.data.settings.timeout_seconds,
-        max_pending_transactions: response.data.settings.max_pending_transactions,
-        qris_merchant_name: response.data.settings.qris_merchant_name,
-        wa_message_template: response.data.settings.wa_message_template
-      });
-    } catch (error) {
-      console.error('Error fetching payment settings:', error);
-      message.error('Gagal mengambil pengaturan pembayaran');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // Fetch WhatsApp groups
-  const fetchGroups = async () => {
-    try {
-      setLoadingGroups(true);
-      const response = await axiosInstance.get('/api/baileys/groups');
-      setGroups(response.data.groups);
-    } catch (error) {
-      console.error('Error fetching groups:', error);
-      message.error('Gagal mengambil daftar grup');
-    } finally {
-      setLoadingGroups(false);
-    }
-  };
-
-  // Initialize WhatsApp
-  const handleInitialize = async () => {
-    try {
-      setLoading(true);
-      await axiosInstance.post('/api/baileys/initialize');
-      message.success('Inisialisasi WhatsApp dimulai, silakan scan QR code');
-      
-      // Tunggu sebentar kemudian cek QR code
-      setTimeout(fetchQRCode, 2000);
-      
-      // Periksa status setiap 5 detik
-      const checkInterval = setInterval(async () => {
-        const response = await axiosInstance.get('/api/baileys/status');
-        setWhatsappStatus(response.data);
-        
-        if (response.data.isConnected) {
-          clearInterval(checkInterval);
-          message.success('WhatsApp berhasil terhubung!');
-          setQrCodeData(null);
-          fetchGroups();
-        } else {
-          // Jika belum terhubung, coba dapatkan QR code
-          fetchQRCode();
-        }
-      }, 5000);
-      
-      // Hentikan pengecekan setelah 2 menit
-      setTimeout(() => {
-        clearInterval(checkInterval);
-      }, 120000);
-    } catch (error) {
-      console.error('Error initializing WhatsApp:', error);
-      message.error('Gagal menginisialisasi WhatsApp');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // Logout WhatsApp
-  const handleLogout = async () => {
-    try {
-      setLoading(true);
-      await axiosInstance.post('/api/baileys/logout');
-      message.success('Berhasil logout dari WhatsApp');
-      setWhatsappStatus({
-        isConnected: false,
-        whatsappNumber: '',
-        groupId: '',
-        groupName: ''
-      });
-      setQrCodeData(null);
-    } catch (error) {
-      console.error('Error logging out WhatsApp:', error);
-      message.error('Gagal logout dari WhatsApp');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // Update group settings
-  const handleUpdateGroup = async (values) => {
-    try {
-      setLoading(true);
-      await axiosInstance.put('/api/baileys/group-settings', values);
-      message.success('Pengaturan grup berhasil diperbarui');
-      fetchWhatsAppStatus();
-    } catch (error) {
-      console.error('Error updating group settings:', error);
-      message.error('Gagal memperbarui pengaturan grup');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // Update payment settings
-  const handleUpdatePaymentSettings = async (values) => {
-    try {
-      setUploadLoading(true);
-      
-      // Buat form data untuk upload file
-      const formData = new FormData();
-      formData.append('timeout_seconds', values.timeout_seconds);
-      formData.append('max_pending_transactions', values.max_pending_transactions);
-      formData.append('qris_merchant_name', values.qris_merchant_name);
-      formData.append('wa_message_template', values.wa_message_template);
-      
-      if (values.qris_image && values.qris_image.fileList && values.qris_image.fileList.length > 0) {
-        formData.append('qris_image', values.qris_image.fileList[0].originFileObj);
-      }
-      
-      // Kirim dengan Content-Type: multipart/form-data
-      const response = await axiosInstance.put('/api/qris/settings', formData, {
-        headers: {
-          'Content-Type': 'multipart/form-data'
-        }
-      });
-      
-      message.success('Pengaturan pembayaran berhasil diperbarui');
-      fetchPaymentSettings();
-    } catch (error) {
-      console.error('Error updating payment settings:', error);
-      message.error('Gagal memperbarui pengaturan pembayaran');
-    } finally {
-      setUploadLoading(false);
-    }
-  };
-
-  // Upload props for QRIS image
-  const uploadProps = {
-    beforeUpload: (file) => {
-      const isImage = file.type.startsWith('image/');
-      if (!isImage) {
-        message.error('Hanya file gambar yang diperbolehkan!');
-      }
-      return isImage || Upload.LIST_IGNORE;
-    },
-    maxCount: 1
-  };
-
+  // Load data ketika komponen dimount
   useEffect(() => {
-    fetchWhatsAppStatus();
-    fetchPaymentSettings();
+    console.log("WhatsAppSettings component mounted");
+    fetchSettings();
     
-    // Polling QR code dan status setiap 10 detik jika belum terhubung
-    const statusInterval = setInterval(() => {
-      if (!whatsappStatus.isConnected) {
-        fetchWhatsAppStatus();
+    // Force end loading after timeout
+    const timeoutId = setTimeout(() => {
+      if (fetchLoading) {
+        console.log("Force ending loading state after timeout");
+        setFetchLoading(false);
+        message.info('Pengaturan dimuat dengan nilai default karena koneksi lambat.');
       }
-    }, 10000);
+    }, 5000); // 5 detik timeout
     
-    return () => clearInterval(statusInterval);
+    return () => {
+      clearTimeout(timeoutId);
+    };
   }, []);
+  
+  // Fetch settings dari server
+  const fetchSettings = async () => {
+    console.log("Starting fetchSettings...");
+    try {
+      setFetchLoading(true);
+      
+      try {
+        console.log("Fetching WhatsApp settings...");
+        const response = await axiosInstance.get('/api/settings/whatsapp');
+        console.log('WhatsApp settings received:', response.data);
+        
+        if (response.data) {
+          setWhatsappNumber(response.data.whatsappNumber || '6281284712684');
+          setTrialEnabled(response.data.trialEnabled !== false);
+          setMessageTemplate(response.data.messageTemplate || 'Halo, saya {username} ({email}) ingin request trial dengan URL: {url_slug}');
+          
+          // Save to localStorage as backup
+          localStorage.setItem('whatsapp_number', response.data.whatsappNumber);
+          localStorage.setItem('whatsapp_trial_enabled', String(response.data.trialEnabled));
+          localStorage.setItem('whatsapp_trial_template', response.data.messageTemplate);
+        } else {
+          // Use default values
+          console.log("Using default WhatsApp values");
+          setWhatsappNumber('6281284712684');
+          setTrialEnabled(true);
+          setMessageTemplate('Halo, saya {username} ({email}) ingin request trial dengan URL: {url_slug}');
+        }
+      } catch (error) {
+        console.error("API request failed:", error);
+        
+        // Get from localStorage
+        const localNumber = localStorage.getItem('whatsapp_number');
+        const localTrialEnabled = localStorage.getItem('whatsapp_trial_enabled');
+        const localTemplate = localStorage.getItem('whatsapp_trial_template');
+        
+        if (localNumber) {
+          console.log("Using data from localStorage");
+          setWhatsappNumber(localNumber);
+          setTrialEnabled(localTrialEnabled !== 'false');
+          setMessageTemplate(localTemplate || 'Halo, saya {username} ({email}) ingin request trial dengan URL: {url_slug}');
+        } else {
+          console.log("Using default hardcoded values");
+          // Use hardcoded defaults
+          setWhatsappNumber('6281284712684');
+          setTrialEnabled(true);
+          setMessageTemplate('Halo, saya {username} ({email}) ingin request trial dengan URL: {url_slug}');
+        }
+        
+        message.warning('Tidak dapat terhubung ke server. Menggunakan pengaturan lokal.');
+      }
+    } catch (error) {
+      console.error("Unexpected error in fetchSettings:", error);
+      message.error('Terjadi kesalahan. Menggunakan pengaturan default.');
+      
+      // Final fallback to hardcoded defaults
+      setWhatsappNumber('6281284712684');
+      setTrialEnabled(true);
+      setMessageTemplate('Halo, saya {username} ({email}) ingin request trial dengan URL: {url_slug}');
+    } finally {
+      console.log("Ending fetchSettings, setting loading state to false");
+      setFetchLoading(false);
+    }
+  };
+
+  // Generate preview message
+  const getPreviewMessage = () => {
+    try {
+      let preview = messageTemplate;
+      Object.keys(previewData).forEach(key => {
+        preview = preview.replace(new RegExp(`{${key}}`, 'g'), previewData[key]);
+      });
+      return preview;
+    } catch (error) {
+      console.error('Error generating preview:', error);
+      return 'Error generating preview';
+    }
+  };
+
+  // Save settings to database
+  const saveSettings = async () => {
+    try {
+      setLoading(true);
+      
+      // Basic validation
+      if (!whatsappNumber) {
+        message.error('Nomor WhatsApp harus diisi');
+        setLoading(false);
+        return;
+      }
+      
+      // Format nomor WhatsApp
+      const whatsappRegex = /^[0-9+]{8,15}$/;
+      if (!whatsappRegex.test(whatsappNumber)) {
+        message.error('Format nomor WhatsApp tidak valid');
+        setLoading(false);
+        return;
+      }
+      
+      // Save to database
+      const settingsData = {
+        whatsappNumber,
+        trialEnabled,
+        messageTemplate
+      };
+      
+      console.log('Sending data to server:', settingsData);
+      
+      try {
+        const response = await axiosInstance.post('/api/settings/whatsapp', settingsData);
+        console.log('Server response:', response.data);
+        
+        // Save also to localStorage as backup
+        localStorage.setItem('whatsapp_number', whatsappNumber);
+        localStorage.setItem('whatsapp_trial_enabled', trialEnabled.toString());
+        localStorage.setItem('whatsapp_trial_template', messageTemplate);
+        
+        message.success('Pengaturan WhatsApp berhasil disimpan');
+        
+        // Re-fetch settings to verify they were saved
+        setTimeout(() => {
+          fetchSettings();
+        }, 1000);
+      } catch (apiError) {
+        console.error('Error saving to API:', apiError);
+        
+        // Save to localStorage if API fails
+        localStorage.setItem('whatsapp_number', whatsappNumber);
+        localStorage.setItem('whatsapp_trial_enabled', trialEnabled.toString());
+        localStorage.setItem('whatsapp_trial_template', messageTemplate);
+        
+        message.warning('Gagal menyimpan ke server. Pengaturan disimpan secara lokal saja.');
+      }
+    } catch (error) {
+      console.error('Error in saveSettings:', error);
+      message.error('Terjadi kesalahan saat menyimpan pengaturan');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Test WhatsApp Support
+  const testWhatsAppSupport = () => {
+    try {
+      if (!whatsappNumber) {
+        message.error('Isi nomor WhatsApp terlebih dahulu');
+        return;
+      }
+      
+      // Open WhatsApp with test message
+      const waLink = `https://wa.me/${whatsappNumber}?text=${encodeURIComponent('Test pesan dari admin panel')}`;
+      window.open(waLink, '_blank');
+      
+      message.success('Membuka WhatsApp dengan pengaturan saat ini');
+    } catch (error) {
+      console.error('Error testing WhatsApp settings:', error);
+      message.error('Gagal menguji pengaturan WhatsApp');
+    }
+  };
+  
+  // Test WhatsApp Trial
+  const testWhatsAppTrial = () => {
+    try {
+      if (!whatsappNumber || !messageTemplate) {
+        message.error('Isi nomor WhatsApp dan template pesan terlebih dahulu');
+        return;
+      }
+      
+      // Generate test message
+      let testMessage = messageTemplate;
+      Object.keys(previewData).forEach(key => {
+        const regex = new RegExp(`{${key}}`, 'g');
+        testMessage = testMessage.replace(regex, previewData[key]);
+      });
+      
+      // Open WhatsApp with test message
+      const waLink = `https://wa.me/${whatsappNumber}?text=${encodeURIComponent(testMessage)}`;
+      window.open(waLink, '_blank');
+      
+      message.success('Membuka WhatsApp dengan pengaturan saat ini');
+    } catch (error) {
+      console.error('Error testing WhatsApp settings:', error);
+      message.error('Gagal menguji pengaturan WhatsApp');
+    }
+  };
+
+  if (fetchLoading) {
+    return (
+      <div style={{ 
+        display: 'flex', 
+        flexDirection: 'column', 
+        justifyContent: 'center', 
+        alignItems: 'center', 
+        minHeight: '400px' 
+      }}>
+        <Spin size="large" />
+        <div style={{ marginTop: 16 }}>Memuat pengaturan...</div>
+      </div>
+    );
+  }
 
   return (
     <div>
-      <Title level={2}>Pengaturan WhatsApp & Pembayaran</Title>
+      <Title level={2}>Pengaturan WhatsApp</Title>
       
-      <Tabs activeKey={activeTab} onChange={setActiveTab}>
-        <TabPane 
-          tab={
-            <span>
-              <WhatsAppOutlined /> Koneksi WhatsApp
-            </span>
-          } 
-          key="1"
-        >
-          <Card>
-            <div style={{ textAlign: 'center', marginBottom: 24 }}>
-              <Title level={4}>Status Koneksi WhatsApp</Title>
-              
-              {whatsappStatus.isConnected ? (
-                <Alert
-                  message="WhatsApp Terhubung"
-                  description={`Nomor: ${whatsappStatus.whatsappNumber || 'Tidak tersedia'}`}
-                  type="success"
-                  showIcon
-                  icon={<CheckCircleOutlined />}
-                />
-              ) : (
-                <Alert
-                  message="WhatsApp Tidak Terhubung"
-                  description="Silakan scan QR code untuk menghubungkan WhatsApp"
-                  type="warning"
-                  showIcon
-                  icon={<CloseCircleOutlined />}
-                />
-              )}
-            </div>
-            
-            {!whatsappStatus.isConnected && qrCodeData && (
-              <div style={{ textAlign: 'center', marginBottom: 24 }}>
-                <Title level={4}>Scan QR Code dengan WhatsApp</Title>
-                <div style={{ marginBottom: 16 }}>
-                  <Image 
-                    src={qrCodeData} 
-                    alt="WhatsApp QR Code" 
-                    style={{ maxWidth: 250 }}
-                    preview={false}
-                  />
-                </div>
-                <Text type="secondary">
-                  Buka WhatsApp di ponsel Anda, tap Menu atau Pengaturan dan pilih WhatsApp Web, 
-                  lalu scan QR code ini.
-                </Text>
-              </div>
-            )}
-            
-            <div style={{ textAlign: 'center', marginBottom: 24 }}>
-              {whatsappStatus.isConnected ? (
-                <Button 
-                  type="primary" 
-                  danger 
-                  icon={<LogoutOutlined />} 
-                  onClick={handleLogout}
-                  loading={loading}
-                >
-                  Logout WhatsApp
-                </Button>
-              ) : (
-                <Button 
-                  type="primary" 
-                  icon={<QrcodeOutlined />} 
-                  onClick={handleInitialize}
-                  loading={loading}
-                >
-                  {qrCodeData ? 'Refresh QR Code' : 'Scan QR Code'}
-                </Button>
-              )}
-            </div>
-            
-            <Divider>Pengaturan Grup</Divider>
-            
-            {whatsappStatus.isConnected ? (
-              <div>
-                <Form
-                  form={groupForm}
-                  layout="vertical"
-                  initialValues={{
-                    groupId: whatsappStatus.groupId,
-                    groupName: whatsappStatus.groupName
-                  }}
-                  onFinish={handleUpdateGroup}
-                >
-                  <Row gutter={16}>
-                    <Col span={16}>
-                      <Form.Item
-                        name="groupId"
-                        label="ID Grup"
-                        rules={[{ required: true, message: 'Silakan pilih grup WhatsApp' }]}
-                      >
-                        <Select
-                          placeholder="Pilih grup WhatsApp"
-                          loading={loadingGroups}
-                          onFocus={fetchGroups}
-                          suffixIcon={loadingGroups ? <SyncOutlined spin /> : null}
-                        >
-                          {groups.map(group => (
-                            <Option key={group.id} value={group.id}>
-                              {group.name} ({group.participants} anggota)
-                            </Option>
-                          ))}
-                        </Select>
-                      </Form.Item>
-                    </Col>
-                    <Col span={8}>
-                      <Form.Item
-                        name="groupName"
-                        label="Nama Grup (untuk referensi)"
-                        rules={[{ required: true, message: 'Silakan masukkan nama grup' }]}
-                      >
-                        <Input placeholder="Nama grup untuk referensi" />
-                      </Form.Item>
-                    </Col>
-                  </Row>
-                  
-                  <Form.Item>
-                    <Button 
-                      type="primary" 
-                      htmlType="submit" 
-                      icon={<UsergroupAddOutlined />}
-                      loading={loading}
-                    >
-                      Simpan Pengaturan Grup
-                    </Button>
-                  </Form.Item>
-                </Form>
-                
-                <Alert
-                  message="Informasi"
-                  description="Grup yang dipilih akan digunakan untuk mengirim notifikasi verifikasi pembayaran."
-                  type="info"
-                  showIcon
-                />
-              </div>
-            ) : (
-              <Alert
-                message="WhatsApp Belum Terhubung"
-                description="Silakan hubungkan WhatsApp terlebih dahulu untuk mengatur grup notifikasi."
-                type="warning"
-                showIcon
+      <Paragraph>
+        Konfigurasi nomor WhatsApp yang digunakan untuk dukungan pelanggan dan permintaan trial.
+        Nomor ini akan digunakan oleh kedua fitur secara bersamaan.
+      </Paragraph>
+      
+      <Card>
+        <Tabs defaultActiveKey="1">
+          <TabPane tab="Pengaturan Umum" key="1">
+            <div style={{ marginBottom: 16 }}>
+              <label style={{ display: 'block', marginBottom: 8, fontWeight: 'bold' }}>
+                Nomor WhatsApp
+              </label>
+              <Input 
+                value={whatsappNumber}
+                onChange={e => setWhatsappNumber(e.target.value)}
+                prefix={<PhoneOutlined />} 
+                placeholder="628123456789"
               />
-            )}
-          </Card>
-        </TabPane>
-        
-        <TabPane 
-          tab={
-            <span>
-              <InfoCircleOutlined /> Pengaturan Pembayaran
-            </span>
-          } 
-          key="2"
-        >
-          <Card>
-            <Form
-              form={settingsForm}
-              layout="vertical"
-              initialValues={paymentSettings}
-              onFinish={handleUpdatePaymentSettings}
-            >
-              <Title level={4}>Pengaturan Umum</Title>
-              
-              <Row gutter={16}>
-                <Col span={12}>
-                  <Form.Item
-                    name="timeout_seconds"
-                    label="Batas Waktu Pembayaran (detik)"
-                    rules={[
-                      { required: true, message: 'Silakan masukkan batas waktu pembayaran' },
-                      { type: 'number', min: 60, message: 'Minimal 60 detik' }
-                    ]}
-                    tooltip="Waktu yang diberikan kepada pengguna untuk menyelesaikan pembayaran sebelum kedaluwarsa"
-                  >
-                    <Input 
-                      type="number" 
-                      min={60} 
-                      placeholder="3600 (1 jam)" 
-                      addonAfter="detik"
-                    />
-                  </Form.Item>
-                </Col>
-                <Col span={12}>
-                  <Form.Item
-                    name="max_pending_transactions"
-                    label="Jumlah Maksimal Pesanan Tertunda"
-                    rules={[
-                      { required: true, message: 'Silakan masukkan jumlah maksimal pesanan tertunda' },
-                      { type: 'number', min: 1, message: 'Minimal 1 pesanan' }
-                    ]}
-                    tooltip="Jumlah maksimal pesanan tertunda yang diizinkan per pengguna"
-                  >
-                    <Input 
-                      type="number" 
-                      min={1} 
-                      placeholder="3" 
-                      addonAfter="pesanan"
-                    />
-                  </Form.Item>
-                </Col>
-              </Row>
-              
-              <Divider>Pengaturan QRIS</Divider>
-              
-              <Row gutter={16}>
-                <Col span={12}>
-                  <Form.Item
-                    name="qris_merchant_name"
-                    label="Nama Merchant QRIS"
-                    rules={[{ required: true, message: 'Silakan masukkan nama merchant QRIS' }]}
-                  >
-                    <Input placeholder="Nama merchant yang muncul di pembayaran QRIS" />
-                  </Form.Item>
-                </Col>
-                <Col span={12}>
-                  <Form.Item
-                    name="qris_image"
-                    label="Gambar QRIS"
-                    valuePropName="file"
-                    tooltip="Gambar kode QR untuk pembayaran QRIS"
-                  >
-                    <Upload {...uploadProps} listType="picture-card">
-                      <div>
-                        <UploadOutlined />
-                        <div style={{ marginTop: 8 }}>Upload</div>
-                      </div>
-                    </Upload>
-                  </Form.Item>
-                </Col>
-              </Row>
-              
-              {paymentSettings.qris_image_path && (
-                <div style={{ marginBottom: 16, textAlign: 'center' }}>
-                  <Text strong>Gambar QRIS Saat Ini:</Text>
-                  <div style={{ marginTop: 8 }}>
-                    <img 
-                      src={paymentSettings.qris_image_path} 
-                      alt="QRIS" 
-                      style={{ maxWidth: 200, maxHeight: 200, border: '1px solid #d9d9d9', borderRadius: 4 }} 
-                    />
-                  </div>
-                </div>
-              )}
-              
-              <Divider>Template Notifikasi</Divider>
-              
-              <Form.Item
-                name="wa_message_template"
-                label="Template Notifikasi WhatsApp"
-                rules={[{ required: true, message: 'Silakan masukkan template notifikasi' }]}
-                tooltip="Template pesan notifikasi yang dikirim ke grup WhatsApp"
+              <div style={{ fontSize: '12px', color: '#888', marginTop: 4 }}>
+                Gunakan format internasional, contoh: 628123456789
+                <br />
+                <strong>Catatan:</strong> Nomor ini akan digunakan untuk keduanya - dukungan pelanggan dan permintaan trial
+              </div>
+            </div>
+            
+            <Alert
+              message="Info"
+              description="Perubahan nomor WhatsApp akan mempengaruhi kedua fitur: tombol support di halaman login dan permintaan trial."
+              type="info"
+              showIcon
+              style={{ marginBottom: 16 }}
+            />
+            
+            <Divider />
+            
+            <Space>
+              <Button 
+                type="primary" 
+                icon={<SaveOutlined />} 
+                loading={loading}
+                onClick={saveSettings}
               >
-                <TextArea 
-                  rows={4} 
-                  placeholder="Template notifikasi pembayaran untuk grup WhatsApp" 
-                />
-              </Form.Item>
+                Simpan Pengaturan
+              </Button>
               
-              <Form.Item>
-                <Button 
-                  type="primary" 
-                  htmlType="submit" 
-                  loading={uploadLoading}
-                >
-                  Simpan Pengaturan Pembayaran
-                </Button>
-              </Form.Item>
-            </Form>
-          </Card>
-        </TabPane>
-      </Tabs>
+              <Button 
+                onClick={testWhatsAppSupport}
+                icon={<WhatsAppOutlined />}
+                style={{ backgroundColor: '#25D366', borderColor: '#25D366', color: 'white' }}
+              >
+                Uji WhatsApp
+              </Button>
+            </Space>
+          </TabPane>
+          
+          <TabPane tab="Pengaturan Trial" key="2">
+            <div style={{ marginBottom: 16 }}>
+              <label style={{ display: 'block', marginBottom: 8, fontWeight: 'bold' }}>
+                Aktifkan Fitur Request Trial
+              </label>
+              <Switch 
+                checked={trialEnabled} 
+                onChange={value => setTrialEnabled(value)} 
+              />
+            </div>
+            
+            <div style={{ marginBottom: 16 }}>
+              <label style={{ display: 'block', marginBottom: 8, fontWeight: 'bold' }}>
+                Template Pesan Request
+              </label>
+              <TextArea 
+                value={messageTemplate}
+                onChange={e => setMessageTemplate(e.target.value)}
+                rows={4} 
+                placeholder="Halo, saya {username} ({email}) ingin request trial dengan URL: {url_slug}" 
+              />
+              <div style={{ fontSize: '12px', color: '#888', marginTop: 4 }}>
+                Gunakan {'{username}'}, {'{email}'}, dan {'{url_slug}'} sebagai placeholder yang akan otomatis diganti dengan data pengguna
+              </div>
+            </div>
+            
+            <Alert
+              message="Preview Pesan"
+              description={getPreviewMessage()}
+              type="info"
+              style={{ marginBottom: 16 }}
+            />
+            
+            <Divider />
+            
+            <Space>
+              <Button 
+                type="primary" 
+                icon={<SaveOutlined />} 
+                loading={loading}
+                onClick={saveSettings}
+              >
+                Simpan Pengaturan
+              </Button>
+              
+              <Button 
+                onClick={testWhatsAppTrial}
+                icon={<MessageOutlined />}
+              >
+                Uji Template Trial
+              </Button>
+            </Space>
+          </TabPane>
+          
+          <TabPane tab="Informasi" key="3">
+            <Card title="Cara Kerja">
+              <div style={{ marginBottom: 16 }}>
+                <Text strong>Dukungan Pelanggan:</Text>
+                <ul>
+                  <li>Pengguna melihat tombol WhatsApp di pojok kanan bawah halaman login</li>
+                  <li>Saat mengklik tombol tersebut, aplikasi akan membuka WhatsApp dengan nomor yang telah dikonfigurasi</li>
+                </ul>
+              </div>
+              
+              <div>
+                <Text strong>Request Trial:</Text>
+                <ul>
+                  <li>Pengguna menekan tombol "Request Trial" di dashboard mereka</li>
+                  <li>Aplikasi akan membuka WhatsApp dengan nomor dan pesan yang telah dikonfigurasi</li>
+                  <li>Admin akan menerima pesan dan dapat memberikan akses trial secara manual</li>
+                </ul>
+              </div>
+            </Card>
+          </TabPane>
+        </Tabs>
+      </Card>
     </div>
   );
 };

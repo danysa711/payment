@@ -1,27 +1,19 @@
-const express = require('express');
+// routes/BaileysRoutes.js
+const express = require("express");
 const router = express.Router();
-const BaileysController = require('../controllers/BaileysController');
-const { authenticateUser, requireAdmin } = require('../middlewares/auth');
+const BaileysController = require("../controllers/BaileysController");
+const { authenticateUser, requireAdmin } = require("../middlewares/auth");
 
-// Middleware untuk memastikan hanya admin yang bisa mengakses
-router.use(authenticateUser, requireAdmin);
+// Middleware untuk semua routes
+router.use(authenticateUser);
+router.use(requireAdmin); // Semua routes memerlukan admin
 
-// Route untuk inisialisasi WhatsApp
-router.post('/baileys/initialize', BaileysController.initialize);
-
-// Route untuk mendapatkan status login
-router.get('/baileys/status', BaileysController.getLoginStatus);
-
-// Route untuk mendapatkan QR code
-router.get('/baileys/qrcode', BaileysController.getQRCode);
-
-// Route untuk logout WhatsApp
-router.post('/baileys/logout', BaileysController.logout);
-
-// Route untuk update pengaturan grup
-router.put('/baileys/group-settings', BaileysController.updateGroupSettings);
-
-// Route untuk mendapatkan daftar grup
-router.get('/baileys/groups', BaileysController.getGroups);
+// Admin routes
+router.get("/baileys/settings", BaileysController.getSettings);
+router.post("/baileys/settings", BaileysController.saveSettings);
+router.post("/baileys/connect", BaileysController.connect);
+router.post("/baileys/disconnect", BaileysController.disconnect);
+router.get("/baileys/status", BaileysController.getStatus);
+router.get("/baileys/logs", BaileysController.getLogs);
 
 module.exports = router;

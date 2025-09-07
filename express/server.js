@@ -14,9 +14,10 @@ const userRoutes = require("./routes/userRoutes");
 const subscriptionRoutes = require("./routes/subscriptionRoutes");
 const publicApiRoutes = require("./routes/publicApiRoutes");
 const settingsRoutes = require('./routes/settingsRoutes'); // Rute pengaturan
-const baileysRoutes = require('./routes/BaileysRoutes');
-const paymentRoutes = require('./routes/PaymentRoutes');
-const paymentService = require('./services/PaymentService');
+const qrisRoutes = require("./routes/QrisRoutes");
+const baileysRoutes = require("./routes/BaileysRoutes");
+const { startScheduler } = require('./utils/scheduler');
+startScheduler();
 
 const app = express();
 const PORT = process.env.PORT || 3500;
@@ -260,8 +261,8 @@ app.use("/api", userRoutes);
 app.use("/api", subscriptionRoutes);
 app.use("/api/public", publicApiRoutes);
 app.use("/api", settingsRoutes);
-app.use('/api', baileysRoutes);
-app.use('/api', paymentRoutes);
+app.use("/api", qrisRoutes);
+app.use("/api", baileysRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
@@ -277,40 +278,12 @@ app.use((req, res) => {
   res.status(404).json({ message: "Endpoint tidak ditemukan" });
 });
 
-const { ensureDbConnection } = require('./utils/db-helper');
-
 // Start server
 app.listen(PORT, async () => {
-  console.log(`🚀 Server berjalan di http://localhost:${PORT}`);
-  
-  const { setupConnectionMonitoring } = require('./utils/db-helper');
-  setupConnectionMonitoring();
-  // Coba inisialisasi koneksi database
   try {
-    const isConnected = await ensureDbConnection();
-    if (isConnected) {
-      console.log('✅ Koneksi database berhasil');
-      
-      // Inisialisasi cron jobs untuk pembayaran
-      try {
-        if (paymentService.initCronJobs) {
-          const initialized = paymentService.initCronJobs();
-          if (initialized) {
-            console.log("✅ Payment cron jobs initialized");
-          } else {
-            console.warn("⚠️ Payment cron jobs initialization returned false");
-          }
-        } else {
-          console.warn("⚠️ initCronJobs not found in paymentService");
-        }
-      } catch (cronError) {
-        console.error("❌ Error initializing cron jobs:", cronError);
-      }
-    } else {
-      console.warn("⚠️ Database connection failed, server running with limited functionality");
-    }
-  } catch (dbError) {
-    console.error("❌ Database connection error:", dbError);
-    console.warn("⚠️ Server running with limited functionality");
+    await db.sequelize.authenticate();
+    console.log(`🚀 Server berjalan di http://localhost:${PORT}`);
+  } catch (error) {
+    console.error("❌ Gagal menyambungkan database:", error);
   }
 });
