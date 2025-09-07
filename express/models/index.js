@@ -3,6 +3,8 @@
 const { DataTypes } = require("sequelize");
 const sequelize = require("../config/database");
 const { Sequelize } = require("sequelize");
+const Setting = require('./setting')(sequelize, Sequelize.DataTypes);
+const WhatsAppSetting = require('./WhatsAppSetting')(sequelize, Sequelize.DataTypes);
 
 const User = sequelize.define(
   "User",
@@ -267,6 +269,8 @@ const db = {
   Subscription,
   SubscriptionPlan,
   WhatsAppTrialSettings,
+  Setting,
+  WhatsAppSetting
 };
 
 Object.keys(db).forEach((modelName) => {
@@ -306,4 +310,4 @@ License.belongsTo(User, { foreignKey: "user_id" });
 User.hasMany(Order, { foreignKey: "user_id" });
 Order.belongsTo(User, { foreignKey: "user_id" });
 
-module.exports = { User, Software, SoftwareVersion, License, Order, OrderLicense, Subscription, SubscriptionPlan, WhatsAppTrialSettings, db };
+module.exports = { User, Software, SoftwareVersion, License, Order, OrderLicense, Subscription, SubscriptionPlan, WhatsAppTrialSettings, Setting, WhatsAppSetting, db };

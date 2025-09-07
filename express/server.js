@@ -12,9 +12,11 @@ const orderRoutes = require("./routes/orderRoutes");
 const authRoutes = require("./routes/authRoutes");
 const userRoutes = require("./routes/userRoutes");
 const subscriptionRoutes = require("./routes/subscriptionRoutes");
-const tripayRoutes = require("./routes/tripayRoutes");
 const publicApiRoutes = require("./routes/publicApiRoutes");
 const settingsRoutes = require('./routes/settingsRoutes'); // Rute pengaturan
+const baileysRoutes = require('./routes/BaileysRoutes');
+const paymentRoutes = require('./routes/PaymentRoutes');
+const paymentService = require('./services/PaymentService');
 
 const app = express();
 const PORT = process.env.PORT || 3500;
@@ -52,31 +54,66 @@ const corsOptions = {
   optionsSuccessStatus: 200
 };
 
+app.get("/api/settings/whatsapp-public", async (req, res) => {
+  try {
+    // Coba ambil data dari database
+    const { WhatsAppSetting } = require('./models');
+    
+    const settings = await WhatsAppSetting.findOne({
+      order: [['id', 'DESC']]
+    });
+    
+    if (settings) {
+      return res.json({
+        whatsappNumber: settings.whatsapp_number,
+        trialEnabled: settings.trial_enabled,
+        messageTemplate: settings.trial_template
+      });
+    } else {
+      // Nilai default jika tidak ada data
+      return res.json({
+        whatsappNumber: '6281284712684',
+        trialEnabled: true,
+        messageTemplate: 'Halo, saya {username} ({email}) ingin request trial dengan URL: {url_slug}'
+      });
+    }
+  } catch (err) {
+    console.error('Error mengakses WhatsApp settings:', err);
+    // Kembalikan nilai default jika terjadi error
+    return res.json({
+      whatsappNumber: '6281284712684',
+      trialEnabled: true,
+      messageTemplate: 'Halo, saya {username} ({email}) ingin request trial dengan URL: {url_slug}'
+    });
+  }
+});
+
 // Middleware untuk debug
 app.use((req, res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
   console.log('Request origin:', req.headers.origin);
   
-  // Pastikan headers CORS selalu ditambahkan
-  res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
-  res.header('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,PATCH,OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
-  res.header('Access-Control-Allow-Credentials', 'true');
-  
-  // Handle preflight
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
+   // Khusus untuk callback Tripay, izinkan akses tanpa CORS
+  if (req.url === '/api/tripay/callback') {
+    console.log('Tripay callback received, bypassing CORS checks');
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, X-Callback-Signature, X-Requested-With');
+    
+    if (req.method === 'OPTIONS') {
+      return res.status(200).end();
+    }
+  } else {
+    // Untuk request lain, gunakan CORS normal
+    res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
+    res.header('Access-Control-Allow-Methods', 'GET, PUT, POST, DELETE, PATCH, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+    res.header('Access-Control-Allow-Credentials', 'true');
+    
+    if (req.method === 'OPTIONS') {
+      return res.status(200).end();
+    }
   }
-
-  const requestInfo = {
-    method: req.method,
-    url: req.url,
-    userId: req.userId || 'not authenticated',
-    userRole: req.userRole || 'not authenticated',
-    timestamp: new Date().toISOString()
-  };
-
-  console.log("REQUEST:", JSON.stringify(requestInfo));
   
   next();
 });
@@ -155,6 +192,64 @@ app.get("/api/test", (req, res) => {
   res.json({ message: "API is working", timestamp: new Date().toISOString() });
 });
 
+app.get("/api/settings/whatsapp", async (req, res) => {
+  try {
+    const { WhatsAppSetting } = require('./models');
+    
+    const settings = await WhatsAppSetting.findOne({
+      order: [['id', 'DESC']]
+    });
+    
+    if (settings) {
+      return res.json({
+        whatsappNumber: settings.whatsapp_number,
+        trialEnabled: settings.trial_enabled,
+        messageTemplate: settings.trial_template
+      });
+    } else {
+      // Default jika tidak ada data
+      return res.json({
+        whatsappNumber: '6281284712684',
+        trialEnabled: true,
+        messageTemplate: 'Halo, saya {username} ({email}) ingin request trial dengan URL: {url_slug}'
+      });
+    }
+  } catch (err) {
+    console.error('Error mengakses WhatsApp settings:', err);
+    return res.json({
+      whatsappNumber: '6281284712684',
+      trialEnabled: true,
+      messageTemplate: 'Halo, saya {username} ({email}) ingin request trial dengan URL: {url_slug}'
+    });
+  }
+});
+
+// Endpoint untuk menyimpan WhatsApp settings
+app.post("/api/settings/whatsapp", async (req, res) => {
+  try {
+    const { WhatsAppSetting } = require('./models');
+    const { whatsappNumber, trialEnabled, messageTemplate } = req.body;
+    
+    // Validasi input
+    if (!whatsappNumber) {
+      return res.status(400).json({ error: 'Nomor WhatsApp harus diisi' });
+    }
+    
+    // Buat setting baru
+    await WhatsAppSetting.create({
+      whatsapp_number: whatsappNumber,
+      trial_enabled: trialEnabled !== undefined ? trialEnabled : true,
+      trial_template: messageTemplate || 'Halo, saya {username} ({email}) ingin request trial dengan URL: {url_slug}',
+      support_enabled: true
+    });
+    
+    res.json({ success: true, message: 'Pengaturan WhatsApp berhasil disimpan' });
+  } catch (err) {
+    console.error('Error menyimpan pengaturan WhatsApp:', err);
+    res.status(500).json({ error: 'Server Error' });
+  }
+});
+
 // Routes
 app.use("/api", licenseRoutes);
 app.use("/api", softwareRoutes);
@@ -163,9 +258,10 @@ app.use("/api", orderRoutes);
 app.use("/api", authRoutes);
 app.use("/api", userRoutes);
 app.use("/api", subscriptionRoutes);
-app.use("/api/tripay", tripayRoutes);
 app.use("/api/public", publicApiRoutes);
-app.use("/api", settingsRoutes); // Tambahkan rute pengaturan
+app.use("/api", settingsRoutes);
+app.use('/api', baileysRoutes);
+app.use('/api', paymentRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
@@ -181,12 +277,40 @@ app.use((req, res) => {
   res.status(404).json({ message: "Endpoint tidak ditemukan" });
 });
 
+const { ensureDbConnection } = require('./utils/db-helper');
+
 // Start server
 app.listen(PORT, async () => {
+  console.log(`🚀 Server berjalan di http://localhost:${PORT}`);
+  
+  const { setupConnectionMonitoring } = require('./utils/db-helper');
+  setupConnectionMonitoring();
+  // Coba inisialisasi koneksi database
   try {
-    await db.sequelize.authenticate();
-    console.log(`🚀 Server berjalan di http://localhost:${PORT}`);
-  } catch (error) {
-    console.error("❌ Gagal menyambungkan database:", error);
+    const isConnected = await ensureDbConnection();
+    if (isConnected) {
+      console.log('✅ Koneksi database berhasil');
+      
+      // Inisialisasi cron jobs untuk pembayaran
+      try {
+        if (paymentService.initCronJobs) {
+          const initialized = paymentService.initCronJobs();
+          if (initialized) {
+            console.log("✅ Payment cron jobs initialized");
+          } else {
+            console.warn("⚠️ Payment cron jobs initialization returned false");
+          }
+        } else {
+          console.warn("⚠️ initCronJobs not found in paymentService");
+        }
+      } catch (cronError) {
+        console.error("❌ Error initializing cron jobs:", cronError);
+      }
+    } else {
+      console.warn("⚠️ Database connection failed, server running with limited functionality");
+    }
+  } catch (dbError) {
+    console.error("❌ Database connection error:", dbError);
+    console.warn("⚠️ Server running with limited functionality");
   }
 });
